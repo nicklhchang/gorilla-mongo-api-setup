@@ -69,20 +69,9 @@ func init() {
 	userCollection = mongoClient.Database("golang-tests").Collection("users")
 }
 
-func testHelloWorld(w http.ResponseWriter, r *http.Request) {
+func readCountAuthedUsers(w http.ResponseWriter, r *http.Request) {
 	// set content type to json; what is being written back as a response
 	// for server sent events, toggle this based on the api route frontend hits
-	w.Header().Set("Content-Type", "application/json")
-	test, err := sessionCollection.InsertOne(context.TODO(), bson.D{
-		{Key: "testing", Value: "first-value"},
-	})
-	if err != nil {
-		panic(err)
-	}
-	json.NewEncoder(w).Encode(fmt.Sprintf("hello mongo %v", test))
-}
-
-func readCountAuthedUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	authUserCount, err := sessionCollection.CountDocuments(context.TODO(), bson.D{})
 	if err != nil {
@@ -219,8 +208,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 		grlchangrs <- session // not process anything else, so block until elsewhere read out
 	}()
 
-	var msg string
-	var cookie string
+	var msg, cookie string
 	for numReceives := 0; numReceives < 2; numReceives++ {
 		select {
 		case session := <-grlchangrs:
@@ -251,13 +239,6 @@ func login(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(msg)
 }
 
-func sessionfind(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var result bson.M
-	_ = sessionCollection.FindOne(context.TODO(), bson.D{{Key: "user", Value: "tester"}}).Decode(&result)
-	json.NewEncoder(w).Encode(fmt.Sprintf("result: %v, just username: %s", result, result["user"]))
-}
-
 func main() {
 	router := mux.NewRouter()
 	// CORS access for frontend running on port 3000
@@ -267,9 +248,6 @@ func main() {
 	apiV1Router := router.PathPrefix("/api/v1").Subrouter()
 	v1AuthRouter := apiV1Router.PathPrefix("/auth").Subrouter()
 	v1ContentRouter := apiV1Router.PathPrefix("/content").Subrouter()
-
-	apiV1Router.HandleFunc("/test", testHelloWorld).Methods("GET")
-	apiV1Router.HandleFunc("/test-session-find", sessionfind).Methods("GET")
 
 	// /chain-test is only 'protected' route
 	v1ContentRouter.

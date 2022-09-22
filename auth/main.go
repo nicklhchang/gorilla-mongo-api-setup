@@ -18,30 +18,6 @@ const cookieCharacters = "abcdefghijklmnopqrstuvwxyz" +
 
 var randSeed *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
-func MockAuthMiddleware(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// mock extraction of cookie
-		var testChainJSONStr string
-		yummers := r.Cookies()
-		for idx, ptrCookie := range yummers {
-			testChainJSONStr += fmt.Sprintf("field %d: %v\n", idx, *ptrCookie)
-		}
-		/*
-			Marshal encodes any Go value into a byte slice which represents JSON
-			Unmarshal decodes a byte slice (which is a JSON representation) into a Go value
-			Encoding and Decoding similar idea to Marshal and Unmarshal but implementation
-			isn't the exact same
-		*/
-		json.NewEncoder(w).Encode(fmt.Sprintf("chaining works? %s", testChainJSONStr))
-		/*
-			purpose of chaining middlewares; pass same w and r through multiple functions (handlers).
-			so call .ServeHTTP on next handler; ServeHTTP takes care of responding to a HTTP request.
-		*/
-		handler.ServeHTTP(w, r)
-	})
-}
-
 /*
 Marshal encodes any Go value into a byte slice which represents JSON
 Unmarshal decodes a byte slice (which is a JSON representation) into a Go value
@@ -55,9 +31,8 @@ func AuthMiddleware(sCollection *mongo.Collection) func(http.Handler) http.Handl
 	return func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			// actual auth logic
 			ptrCookieSlice := r.Cookies()
-			fmt.Printf("cookies: %v\n", ptrCookieSlice)
+			// fmt.Printf("cookies: %v\n", ptrCookieSlice)
 			var sessionID string
 			for _, ptrCookie := range ptrCookieSlice {
 				if (*ptrCookie).Name == "session-id" {
@@ -65,8 +40,6 @@ func AuthMiddleware(sCollection *mongo.Collection) func(http.Handler) http.Handl
 				}
 			}
 			if len(sessionID) > 0 {
-				// can't really dispatch into another goroutine because rest of this function
-				// has to wait for result of Exists(), so has to block anyways
 				exists, err := Exists(bson.D{{Key: "session", Value: sessionID}}, sCollection)
 				if err != nil {
 					log.Fatal(err) // something wrong with db
