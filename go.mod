@@ -1,14 +1,14 @@
-module testing/gorilla-mongo-auth
+module github.com/nicklhchang/gorilla-mongo-api-setup
 
 go 1.19
 
-replace gorilla-mongo-auth/auth => ./auth
+replace gorilla-mongo-api-setup/auth => ./auth
 
 require (
 	github.com/gorilla/handlers v1.5.1
 	github.com/gorilla/mux v1.8.0
 	go.mongodb.org/mongo-driver v1.10.2
-	gorilla-mongo-auth/auth v0.0.0
+	gorilla-mongo-api-setup/auth v0.0.0
 )
 
 require (

@@ -14,10 +14,11 @@ import (
 	mux "github.com/gorilla/mux"
 	godotenv "github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
-	auth "gorilla-mongo-auth/auth"
+	auth "gorilla-mongo-api-setup/auth"
 )
 
 var sessionCollection *mongo.Collection
@@ -89,9 +90,10 @@ func chainMiddleware(baseHandler http.Handler,
 }
 
 /*
-search for existing user
-if not existing then create new user in db
-then create a new session
+search for user (blocking i.e. will wait for Exists() to resolve).
+if not already exist then fire off goroutines to create new user and session
+in no specific order (concurrently): leverage context switching as mongo api calls
+will place its goroutine into waiting state.
 https://stackoverflow.com/questions/43021058/golang-read-request-body-multiple-times
 */
 func register(w http.ResponseWriter, r *http.Request) {
@@ -109,11 +111,9 @@ func register(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Println("couldn't unmarshal the byte slice representation of JSON into a map")
 	}
-	// construct bson document describing the user credentials passed in by body
+	// construct bson document that has user field to search for existence
 	var userAsBSOND bson.D
-	for key, value := range userInputMap {
-		userAsBSOND = append(userAsBSOND, bson.E{Key: key, Value: value})
-	}
+	userAsBSOND = append(userAsBSOND, bson.E{Key: "user", Value: userInputMap["user"]})
 
 	// this has to block, because whether or not user exists determines course of action
 	found, err := auth.Exists(userAsBSOND, userCollection)
@@ -154,8 +154,10 @@ func register(w http.ResponseWriter, r *http.Request) {
 }
 
 /*
-1. dispatch goroutine: search for user in user collection
-2. dispatch goroutine: search for session using field "user" instead of "session"
+1. dispatch goroutine: search for user in user collection.
+2. dispatch goroutine: search for session using field "user" instead of "session".
+firing off 1. and 2. at same time to leverage context switching: each goroutine will
+be in waiting state for mongo api calls FindOne() and InsertOne() to resolve.
 to be considered 'logged in':
   - 1. exists and 2. not exists: create session document in db, Set-Cookie in response
   - 1. exists and 2. exists:
@@ -176,11 +178,6 @@ func login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmt.Println("couldn't unmarshal the byte slice representation of JSON into a map")
 	}
-	// construct bson document describing the user credentials passed in by body
-	var userAsBSOND bson.D
-	for key, value := range userInputMap {
-		userAsBSOND = append(userAsBSOND, bson.E{Key: key, Value: value})
-	}
 	var sessionAsBSOND bson.D
 	sessionAsBSOND = append(sessionAsBSOND, bson.E{Key: "user", Value: userInputMap["user"]})
 
@@ -193,7 +190,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 	grlchangrs := make(chan string)
 	// search for user existence in user collection
 	go func() {
-		userExists, err := auth.Exists(userAsBSOND, userCollection)
+		userExists, err := auth.VerifyUserCredentials(userInputMap, userCollection)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -209,16 +206,17 @@ func login(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	var msg, cookie string
+	// could use waitgroups but ugly when do two wg.Done()'s if !userExists :-)
 	for numReceives := 0; numReceives < 2; numReceives++ {
 		select {
 		case session := <-grlchangrs:
 			if len(session) > 0 { // found a valid session but not sure if user valid
 				cookie = session
 			} else {
-				// make compatible with current CreateNewSession() which shares result via channel
+				/* can create a new session even if haven't verified existence of a user yet; for
+				any valid session id to be sent back to client, user credentials will first be
+				verified anyways. */
 				chanSString := make(chan string)
-				// even if context switch back to this login goroutine while waiting for InsertOne()
-				// rest of this function blocked by cookie = <-chanSString
 				go auth.CreateNewSession(chanSString, userInputMap, sessionCollection)
 				cookie = <-chanSString
 			}
@@ -227,8 +225,8 @@ func login(w http.ResponseWriter, r *http.Request) {
 			if !userExists {
 				// rewrite Set-Cookie headers if somehow a valid session was set by above
 				// prevent bug if there is a session document for a user but user not registered
-				cookie = "session-id=oopsSomebodysUnauthenticated"
-				msg = "wrong login credentials"
+				cookie = "oopsSomebodysUnauthenticated"
+				msg = "wrong login credentials. if you forgot your username try registering again"
 				// skip straight out of for loop: prevent any overwriting from other case (safety)
 				numReceives = 2
 			}
@@ -237,6 +235,34 @@ func login(w http.ResponseWriter, r *http.Request) {
 	// doesn't matter if client already has cookie set in header, overwrite
 	w.Header().Set("Set-Cookie", fmt.Sprintf("session-id=%s", cookie))
 	json.NewEncoder(w).Encode(msg)
+}
+
+// not used
+func upsertSession(w http.ResponseWriter, r *http.Request) {
+	// set http headers for when need to send response back
+	w.Header().Set("Content-Type", "application/json")
+
+	// pull out json from request body into a byte slice then into a nice map for later use
+	var userInputMap map[string]string
+	// fmt.Printf("body value: %v, body type: %T", (*r).Body, (*r).Body)
+	userInputBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		json.NewEncoder(w).Encode("error: no body could be read")
+	}
+	err = json.Unmarshal(userInputBytes, &userInputMap)
+	if err != nil {
+		fmt.Println("couldn't unmarshal the byte slice representation of JSON into a map")
+	}
+	// construct bson document describing the user credentials passed in by body
+	sessionAsBSONM := make(bson.M)
+	sessionAsBSONM["user"] = userInputMap["user"]
+
+	upsertIDChan := make(chan primitive.ObjectID)
+
+	go auth.UpsertSessionOnLogin(upsertIDChan, sessionAsBSONM, sessionCollection)
+	id := <-upsertIDChan
+	w.Header().Set("Set-Cookie", fmt.Sprintf("session-id=%v", id))
+	json.NewEncoder(w).Encode(id)
 }
 
 func main() {
@@ -260,6 +286,8 @@ func main() {
 
 	v1AuthRouter.HandleFunc("/register", register).Methods("POST")
 	v1AuthRouter.HandleFunc("/login", login).Methods("POST")
+	// not used
+	v1AuthRouter.HandleFunc("/upsert-login", upsertSession).Methods("POST")
 
 	log.Fatal(http.ListenAndServe(":3001", router))
 }

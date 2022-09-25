@@ -1,8 +1,11 @@
-module crud-mongo-auth/auth
+module github.com/nicklhchang/gorilla-mongo-api-setup/auth
 
 go 1.19
 
-require go.mongodb.org/mongo-driver v1.10.2
+require (
+	github.com/joho/godotenv v1.4.0
+	go.mongodb.org/mongo-driver v1.10.2
+)
 
 require (
 	github.com/golang/snappy v0.0.1 // indirect
